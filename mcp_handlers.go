@@ -292,7 +292,16 @@ func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
 }
 
 // handleSearchFeeds 处理搜索Feeds
-func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs) *MCPToolResult {
+func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs) (response *MCPToolResult) {
+	ctx, diagnostics := xiaohongshu.StartSearchDiagnostics(ctx)
+	defer diagnostics.Close()
+	diagnostics.Mark("search_handler_start")
+	defer func() {
+		if response != nil {
+			diagnostics.Mark("response_ready")
+		}
+		diagnostics.Finish(ctx, response != nil, response != nil && response.IsError)
+	}()
 	logrus.Info("MCP: 搜索Feeds")
 
 	if args.Keyword == "" {

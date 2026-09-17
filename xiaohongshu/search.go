@@ -103,11 +103,21 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	// 注意 .Context(ctx) 会替换掉 NewSearchAction 里设的 60s deadline，必须在其后重新 Timeout，
 	// 否则搜索页不 stable 时 MustWaitStable/MustWait 会永久挂起（无 deadline 可依赖）。
 	page := s.page.Context(ctx).Timeout(60 * time.Second)
+	diagnostics := SearchDiagnosticsFrom(ctx)
+	defer diagnostics.ObserveContext(page.GetContext())
 
 	searchURL := makeSearchURL(keyword)
-	page.MustNavigate(searchURL)
-	page.MustWaitStable()
-	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+	diagnostics.Step(page.GetContext(), "navigation", func() { page.MustNavigate(searchURL) })
+	// Direct URL navigation, not an input-box submission.
+	diagnostics.Mark("search_request_submitted")
+	diagnostics.ProbeResults(page)
+	func() {
+		defer diagnostics.ProbeResults(page)
+		diagnostics.Step(page.GetContext(), "stable_wait", func() { page.MustWaitStable() })
+	}()
+	diagnostics.Step(page.GetContext(), "result_state_wait", func() {
+		page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+	})
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
 	if len(pending) > 0 {
@@ -140,7 +150,9 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		waitFeedsChanged(page, before, 15*time.Second)
 	}
 
-	result := page.MustEval(`() => {
+	var result string
+	diagnostics.Step(page.GetContext(), "extraction", func() {
+		result = page.MustEval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.search &&
 		    window.__INITIAL_STATE__.search.feeds) {
@@ -152,13 +164,17 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		}
 		return "";
 	}`).String()
+	})
 
 	if result == "" {
 		return nil, errors.ErrNoFeeds
 	}
 
 	var feeds []Feed
-	if err := json.Unmarshal([]byte(result), &feeds); err != nil {
+	diagnostics.Begin("parse_start")
+	err = json.Unmarshal([]byte(result), &feeds)
+	diagnostics.ParseEnd(err)
+	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal feeds: %w", err)
 	}
 

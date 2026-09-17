@@ -389,25 +389,35 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 	return response, nil
 }
 
-func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
+func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (response *FeedsListResponse, err error) {
+	diagnostics := xiaohongshu.SearchDiagnosticsFrom(ctx)
+	returned := false
 	b := newBrowser()
-	defer b.Close()
+	diagnostics.Mark("browser_context_created")
+	defer func() {
+		diagnostics.CloseResource(ctx, "browser", returned, err != nil, func() error { b.Close(); return nil })
+	}()
 
 	page := b.NewPage()
-	defer page.Close()
+	diagnostics.Mark("page_context_created")
+	defer func() {
+		diagnostics.CloseResource(ctx, "page", returned, err != nil, page.Close)
+	}()
 
 	action := xiaohongshu.NewSearchAction(page)
 
 	feeds, err := action.Search(ctx, keyword, filters...)
 	if err != nil {
+		returned = true
 		return nil, err
 	}
 
-	response := &FeedsListResponse{
+	response = &FeedsListResponse{
 		Feeds: feeds,
 		Count: len(feeds),
 	}
 
+	returned = true
 	return response, nil
 }
 
