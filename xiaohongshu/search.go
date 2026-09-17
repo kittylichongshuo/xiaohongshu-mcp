@@ -152,8 +152,35 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 
 	var result string
 	extractionSource := "unknown"
+	var containerState *FeedContainerState
 	diagnostics.Step(page.GetContext(), "extraction", func() {
 		extracted := page.MustEval(`(diagnosticsEnabled) => {
+		// Metadata is observational: serialization/selection remain outside this catch.
+		const finish = (data, source, selectedFeeds, hasValue, feedsData) => {
+		    if (!diagnosticsEnabled) return data;
+		    let container_state = null;
+		    try {
+		        const search = window.__INITIAL_STATE__ && window.__INITIAL_STATE__.search;
+		        const feeds = selectedFeeds || (search && search.feeds);
+		        const value = feeds ? feeds.value : undefined;
+		        const backing = feeds ? feeds._value : undefined;
+		        const valueArray = Array.isArray(value);
+		        const backingArray = Array.isArray(backing);
+		        container_state = {
+		            initial_state_search_present: Boolean(search),
+		            feeds_container_present: Boolean(feeds),
+		            value_present: value !== undefined,
+		            value_is_array: valueArray,
+		            value_count: valueArray ? value.length : null,
+		            _value_present: backing !== undefined,
+		            _value_is_array: backingArray,
+		            _value_count: backingArray ? backing.length : null,
+		            selected_source: selectedFeeds ? (hasValue ? "value" : (feedsData !== undefined ? "_value" : "none")) : "none",
+		            selected_count: Array.isArray(feedsData) ? feedsData.length : null
+		        };
+		    } catch (_) { /* Observation failure cannot alter extraction. */ }
+		    return {data, source, container_state};
+		};
 		let source = "none";
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.search &&
@@ -164,21 +191,23 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			source = hasValue ? "value" : "_value";
 			if (feedsData) {
 				const data = JSON.stringify(feedsData);
-				return diagnosticsEnabled ? {data, source} : data;
+				return finish(data, source, feeds, hasValue, feedsData);
 			}
+		    return finish("", source, feeds, hasValue, feedsData);
 		}
-		return diagnosticsEnabled ? {data: "", source} : "";
+		return finish("", source);
 	}`, diagnostics != nil)
 		if diagnostics == nil {
 			result = extracted.String()
 		} else {
 			result = extracted.Get("data").Str()
 			extractionSource = extracted.Get("source").Str()
+			containerState = decodeFeedContainerState(extracted.Get("container_state"))
 		}
 	})
 
 	if result == "" {
-		diagnostics.Provenance(extractionSource, nil, nil, false)
+		diagnostics.Provenance(extractionSource, nil, nil, false, containerState)
 		return nil, errors.ErrNoFeeds
 	}
 
@@ -187,12 +216,12 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	err = json.Unmarshal([]byte(result), &feeds)
 	diagnostics.ParseEnd(err)
 	if err != nil {
-		diagnostics.Provenance(extractionSource, nil, nil, false)
+		diagnostics.Provenance(extractionSource, nil, nil, false, containerState)
 		return nil, fmt.Errorf("failed to unmarshal feeds: %w", err)
 	}
 
 	notes := onlyNotes(feeds)
-	diagnostics.Provenance(extractionSource, feeds, notes, true)
+	diagnostics.Provenance(extractionSource, feeds, notes, true, containerState)
 	return notes, nil
 }
 

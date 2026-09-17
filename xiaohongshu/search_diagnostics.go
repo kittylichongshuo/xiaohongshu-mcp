@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/ysmood/gson"
 )
 
 type searchDiagnosticKey struct{}
@@ -24,7 +25,56 @@ type SearchDiagnostics struct {
 	contextReason string
 }
 
+// Pointer fields distinguish unavailable observations from false/zero.
+type FeedContainerState struct {
+	InitialStateSearchPresent *bool  `json:"initial_state_search_present,omitempty"`
+	FeedsContainerPresent     *bool  `json:"feeds_container_present,omitempty"`
+	ValuePresent              *bool  `json:"value_present,omitempty"`
+	ValueIsArray              *bool  `json:"value_is_array,omitempty"`
+	ValueCount                *int   `json:"value_count,omitempty"`
+	BackingValuePresent       *bool  `json:"_value_present,omitempty"`
+	BackingValueIsArray       *bool  `json:"_value_is_array,omitempty"`
+	BackingValueCount         *int   `json:"_value_count,omitempty"`
+	SelectedSource            string `json:"selected_source"`
+	SelectedCount             *int   `json:"selected_count,omitempty"`
+}
+
+// Decode only the fixed scalar schema. Never log the incoming object.
+// Invalid metadata is unavailable, not a search error or fabricated zero.
+func decodeFeedContainerState(value gson.JSON) (state *FeedContainerState) {
+	state = &FeedContainerState{SelectedSource: "unknown"}
+	defer func() {
+		if recover() != nil {
+			state = &FeedContainerState{SelectedSource: "unknown"}
+		}
+	}()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return state
+	}
+	var parsed FeedContainerState
+	if err := json.Unmarshal(encoded, &parsed); err != nil {
+		return state
+	}
+	switch parsed.SelectedSource {
+	case "value", "_value", "none", "unknown":
+	default:
+		return state
+	}
+	if parsed.ValueIsArray == nil || !*parsed.ValueIsArray || (parsed.ValueCount != nil && *parsed.ValueCount < 0) {
+		parsed.ValueCount = nil
+	}
+	if parsed.BackingValueIsArray == nil || !*parsed.BackingValueIsArray || (parsed.BackingValueCount != nil && *parsed.BackingValueCount < 0) {
+		parsed.BackingValueCount = nil
+	}
+	if parsed.SelectedSource == "none" || parsed.SelectedSource == "unknown" || (parsed.SelectedCount != nil && *parsed.SelectedCount < 0) {
+		parsed.SelectedCount = nil
+	}
+	return &parsed
+}
+
 type SearchProvenance struct {
+	*FeedContainerState
 	RawExtractedFeedCount *int           `json:"raw_extracted_feed_count,omitempty"`
 	PostOnlyNotesCount    *int           `json:"post_onlyNotes_count,omitempty"`
 	ModelTypeCounts       map[string]int `json:"model_type_counts"`
@@ -314,7 +364,7 @@ func (d *SearchDiagnostics) ProbeResults(page *rod.Page) {
 // Provenance records only counts, never feed contents or arbitrary ModelType
 // strings. New/unrecognized types intentionally collapse to unknown. Counts are
 // absent (not zero) when extraction/parse did not produce a []Feed.
-func (d *SearchDiagnostics) Provenance(source string, feeds, notes []Feed, parsed bool) {
+func (d *SearchDiagnostics) Provenance(source string, feeds, notes []Feed, parsed bool, states ...*FeedContainerState) {
 	if d == nil {
 		return
 	}
@@ -324,6 +374,9 @@ func (d *SearchDiagnostics) Provenance(source string, feeds, notes []Feed, parse
 		source = "unknown"
 	}
 	record := &SearchProvenance{ExtractionSource: source}
+	if len(states) == 1 {
+		record.FeedContainerState = states[0]
+	}
 	status, class := "failure", "operation_error"
 	if parsed {
 		raw, post := len(feeds), len(notes)
