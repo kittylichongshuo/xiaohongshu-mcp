@@ -375,6 +375,8 @@ type diagnosticFakeCDP struct {
 	navigationCalls, probeCalls int
 	probeError                  bool
 	probeVisible                bool
+	extractionSource            string
+	extractionJSON              *string
 }
 
 func (f *diagnosticFakeCDP) Event() <-chan *cdp.Event { return f.events }
@@ -411,8 +413,21 @@ func (f *diagnosticFakeCDP) Call(ctx context.Context, session, method string, pa
 	case "Runtime.callFunctionOn":
 		req := params.(proto.RuntimeCallFunctionOn)
 		if strings.Contains(req.FunctionDeclaration, "JSON.stringify(feedsData)") {
-			result := map[string]any{"result": map[string]any{"type": "string", "value": `[{"modelType":"note","id":"synthetic"}]`}}
-			return json.Marshal(result)
+			data := `[{"modelType":"note","id":"synthetic"}]`
+			if f.extractionJSON != nil {
+				data = *f.extractionJSON
+			}
+			source := f.extractionSource
+			if source == "" {
+				source = "value"
+			}
+			var value any = data
+			kind := "string"
+			if len(req.Arguments) > 0 && req.Arguments[0].Value.Bool() {
+				value = map[string]any{"data": data, "source": source}
+				kind = "object"
+			}
+			return json.Marshal(map[string]any{"result": map[string]any{"type": kind, "value": value}})
 		}
 		if !req.ReturnByValue {
 			return []byte(`{"result":{"type":"function","objectId":"helper"}}`), nil
@@ -471,7 +486,7 @@ func TestSearchDiagnosticsRealSearchWithFakeTransport(t *testing.T) {
 				return
 			}
 			events := diagnosticTestEvents(t, path)
-			want := []string{"navigation_start", "navigation_end", "search_request_submitted", "results_visible_probe", "stable_wait_start", "stable_wait_end", "results_visible_probe", "result_state_wait_start", "result_state_wait_end", "extraction_start", "extraction_end", "parse_start", "parse_end"}
+			want := []string{"navigation_start", "navigation_end", "search_request_submitted", "results_visible_probe", "stable_wait_start", "stable_wait_end", "results_visible_probe", "result_state_wait_start", "result_state_wait_end", "extraction_start", "extraction_end", "parse_start", "parse_end", "zero_result_provenance"}
 			var stages []string
 			for _, event := range events {
 				stages = append(stages, event.Stage)

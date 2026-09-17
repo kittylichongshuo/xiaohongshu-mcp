@@ -151,22 +151,34 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	}
 
 	var result string
+	extractionSource := "unknown"
 	diagnostics.Step(page.GetContext(), "extraction", func() {
-		result = page.MustEval(`() => {
+		extracted := page.MustEval(`(diagnosticsEnabled) => {
+		let source = "none";
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.search &&
 		    window.__INITIAL_STATE__.search.feeds) {
 			const feeds = window.__INITIAL_STATE__.search.feeds;
-			const feedsData = feeds.value !== undefined ? feeds.value : feeds._value;
+			const hasValue = feeds.value !== undefined;
+			const feedsData = hasValue ? feeds.value : feeds._value;
+			source = hasValue ? "value" : "_value";
 			if (feedsData) {
-				return JSON.stringify(feedsData);
+				const data = JSON.stringify(feedsData);
+				return diagnosticsEnabled ? {data, source} : data;
 			}
 		}
-		return "";
-	}`).String()
+		return diagnosticsEnabled ? {data: "", source} : "";
+	}`, diagnostics != nil)
+		if diagnostics == nil {
+			result = extracted.String()
+		} else {
+			result = extracted.Get("data").Str()
+			extractionSource = extracted.Get("source").Str()
+		}
 	})
 
 	if result == "" {
+		diagnostics.Provenance(extractionSource, nil, nil, false)
 		return nil, errors.ErrNoFeeds
 	}
 
@@ -175,10 +187,13 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	err = json.Unmarshal([]byte(result), &feeds)
 	diagnostics.ParseEnd(err)
 	if err != nil {
+		diagnostics.Provenance(extractionSource, nil, nil, false)
 		return nil, fmt.Errorf("failed to unmarshal feeds: %w", err)
 	}
 
-	return onlyNotes(feeds), nil
+	notes := onlyNotes(feeds)
+	diagnostics.Provenance(extractionSource, feeds, notes, true)
+	return notes, nil
 }
 
 // feedIDsJS 读当前结果集的 id 列表，用来判断数据有没有换一批。

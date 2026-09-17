@@ -24,7 +24,15 @@ type SearchDiagnostics struct {
 	contextReason string
 }
 
+type SearchProvenance struct {
+	RawExtractedFeedCount *int           `json:"raw_extracted_feed_count,omitempty"`
+	PostOnlyNotesCount    *int           `json:"post_onlyNotes_count,omitempty"`
+	ModelTypeCounts       map[string]int `json:"model_type_counts"`
+	ExtractionSource      string         `json:"extraction_source"`
+}
+
 type searchDiagnosticEvent struct {
+	*SearchProvenance
 	RequestID  string  `json:"request_id"`
 	ElapsedMS  float64 `json:"elapsed_ms"`
 	Stage      string  `json:"stage"`
@@ -90,13 +98,13 @@ func diagnosticStage(stage string) bool {
 		"stable_wait_start", "stable_wait_end", "result_state_wait_start", "result_state_wait_end",
 		"results_visible_probe", "extraction_start", "extraction_end", "parse_start", "parse_end",
 		"response_ready", "handler_return", "context_deadline", "context_cancelled",
-		"page_close_start", "page_close_end", "browser_close_start", "browser_close_end", "close_reason":
+		"page_close_start", "page_close_end", "browser_close_start", "browser_close_end", "close_reason", "zero_result_provenance":
 		return true
 	}
 	return false
 }
 
-func (d *SearchDiagnostics) event(stage, status, errorClass, reason string) {
+func (d *SearchDiagnostics) event(stage, status, errorClass, reason string, provenance ...*SearchProvenance) {
 	if d == nil || !diagnosticStage(stage) {
 		return
 	}
@@ -120,7 +128,11 @@ func (d *SearchDiagnostics) event(stage, status, errorClass, reason string) {
 	if d.file == nil {
 		return
 	}
-	data, err := json.Marshal(searchDiagnosticEvent{d.requestID, float64(time.Since(d.start).Nanoseconds()) / 1e6, stage, status, errorClass, reason})
+	event := searchDiagnosticEvent{RequestID: d.requestID, ElapsedMS: float64(time.Since(d.start).Nanoseconds()) / 1e6, Stage: stage, Status: status, ErrorClass: errorClass, Reason: reason}
+	if stage == "zero_result_provenance" && len(provenance) == 1 {
+		event.SearchProvenance = provenance[0]
+	}
+	data, err := json.Marshal(event)
 	if err == nil {
 		_, err = d.file.Write(append(data, '\n'))
 	}
@@ -297,4 +309,35 @@ func (d *SearchDiagnostics) ProbeResults(page *rod.Page) {
 		}
 		return result.Result.Value.Bool(), nil
 	})
+}
+
+// Provenance records only counts, never feed contents or arbitrary ModelType
+// strings. New/unrecognized types intentionally collapse to unknown. Counts are
+// absent (not zero) when extraction/parse did not produce a []Feed.
+func (d *SearchDiagnostics) Provenance(source string, feeds, notes []Feed, parsed bool) {
+	if d == nil {
+		return
+	}
+	switch source {
+	case "value", "_value", "none", "unknown":
+	default:
+		source = "unknown"
+	}
+	record := &SearchProvenance{ExtractionSource: source}
+	status, class := "failure", "operation_error"
+	if parsed {
+		raw, post := len(feeds), len(notes)
+		record.RawExtractedFeedCount, record.PostOnlyNotesCount = &raw, &post
+		record.ModelTypeCounts = map[string]int{}
+		for _, feed := range feeds {
+			kind := "unknown"
+			switch feed.ModelType {
+			case "note", "live_v2", "hot_query":
+				kind = feed.ModelType
+			}
+			record.ModelTypeCounts[kind]++
+		}
+		status, class = "success", "none"
+	}
+	d.event("zero_result_provenance", status, class, "", record)
 }
