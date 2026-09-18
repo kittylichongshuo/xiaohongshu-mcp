@@ -29,18 +29,23 @@ func diagnosticTestStart(t *testing.T) (context.Context, *SearchDiagnostics, str
 	return ctx, d, path
 }
 
-func diagnosticTestEvents(t *testing.T, path string) []searchDiagnosticEvent {
+type testDiagnosticEvent struct {
+	searchDiagnosticEvent
+	Phase string `json:"phase"`
+}
+
+func diagnosticTestEvents(t *testing.T, path string) []testDiagnosticEvent {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var events []searchDiagnosticEvent
+	var events []testDiagnosticEvent
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if line == "" {
 			continue
 		}
-		var event searchDiagnosticEvent
+		var event testDiagnosticEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			t.Fatal(err)
 		}
@@ -401,6 +406,12 @@ func (f *diagnosticFakeCDP) Call(ctx context.Context, session, method string, pa
 		if req.Expression == "window" {
 			return []byte(`{"result":{"type":"object","objectId":"window"}}`), nil
 		}
+		if req.Expression == searchStateTimelineJS {
+			if f.probeError {
+				return nil, errors.New("synthetic timeline failure")
+			}
+			return []byte(`{"result":{"type":"object","value":{"dom_note_count":2,"value_count":0,"_value_count":0,"result_container_present":true}}}`), nil
+		}
 		f.probeCalls++
 		if f.probeError {
 			return nil, errors.New("synthetic observer failure")
@@ -489,7 +500,9 @@ func TestSearchDiagnosticsRealSearchWithFakeTransport(t *testing.T) {
 			want := []string{"navigation_start", "navigation_end", "search_request_submitted", "results_visible_probe", "stable_wait_start", "stable_wait_end", "results_visible_probe", "result_state_wait_start", "result_state_wait_end", "extraction_start", "extraction_end", "parse_start", "parse_end", "zero_result_provenance"}
 			var stages []string
 			for _, event := range events {
-				stages = append(stages, event.Stage)
+				if event.Stage != "search_state_timeline" {
+					stages = append(stages, event.Stage)
+				}
 			}
 			if !reflect.DeepEqual(stages, want) {
 				t.Fatal(stages)
@@ -501,7 +514,23 @@ func TestSearchDiagnosticsRealSearchWithFakeTransport(t *testing.T) {
 			if mode == "probe_error" {
 				status = "unknown"
 			}
-			if events[3].Status != status || events[6].Status != status {
+			var visible []searchDiagnosticEvent
+			var phases []string
+			for _, event := range events {
+				if event.Stage == "results_visible_probe" {
+					visible = append(visible, event.searchDiagnosticEvent)
+				}
+				if event.Stage == "search_state_timeline" {
+					phases = append(phases, event.Phase)
+					if mode == "probe_error" && event.Status != "unknown" {
+						t.Fatal("timeline failure not isolated")
+					}
+				}
+			}
+			if !reflect.DeepEqual(phases, []string{"after_navigation", "after_stable_wait", "after_result_state_wait", "before_extraction"}) {
+				t.Fatal(phases)
+			}
+			if visible[0].Status != status || visible[1].Status != status {
 				t.Fatal("probe observation incorrect")
 			}
 		})

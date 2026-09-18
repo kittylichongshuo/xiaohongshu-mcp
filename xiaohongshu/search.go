@@ -111,13 +111,16 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	// Direct URL navigation, not an input-box submission.
 	diagnostics.Mark("search_request_submitted")
 	diagnostics.ProbeResults(page)
+	diagnostics.ProbeTimeline(page, "after_navigation")
 	func() {
 		defer diagnostics.ProbeResults(page)
 		diagnostics.Step(page.GetContext(), "stable_wait", func() { page.MustWaitStable() })
 	}()
+	diagnostics.ProbeTimeline(page, "after_stable_wait")
 	diagnostics.Step(page.GetContext(), "result_state_wait", func() {
 		page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
 	})
+	diagnostics.ProbeTimeline(page, "after_result_state_wait")
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
 	if len(pending) > 0 {
@@ -153,6 +156,7 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	var result string
 	extractionSource := "unknown"
 	var containerState *FeedContainerState
+	diagnostics.ProbeTimeline(page, "before_extraction")
 	diagnostics.Step(page.GetContext(), "extraction", func() {
 		extracted := page.MustEval(`(diagnosticsEnabled) => {
 		// Metadata is observational: serialization/selection remain outside this catch.

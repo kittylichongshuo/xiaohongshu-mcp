@@ -173,14 +173,18 @@ func (d *SearchDiagnostics) event(stage, status, errorClass, reason string, prov
 	default:
 		reason = "unknown"
 	}
+	event := searchDiagnosticEvent{RequestID: d.requestID, ElapsedMS: float64(time.Since(d.start).Nanoseconds()) / 1e6, Stage: stage, Status: status, ErrorClass: errorClass, Reason: reason}
+	if stage == "zero_result_provenance" && len(provenance) == 1 {
+		event.SearchProvenance = provenance[0]
+	}
+	d.writeEvent(event)
+}
+
+func (d *SearchDiagnostics) writeEvent(event any) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.file == nil {
 		return
-	}
-	event := searchDiagnosticEvent{RequestID: d.requestID, ElapsedMS: float64(time.Since(d.start).Nanoseconds()) / 1e6, Stage: stage, Status: status, ErrorClass: errorClass, Reason: reason}
-	if stage == "zero_result_provenance" && len(provenance) == 1 {
-		event.SearchProvenance = provenance[0]
 	}
 	data, err := json.Marshal(event)
 	if err == nil {
