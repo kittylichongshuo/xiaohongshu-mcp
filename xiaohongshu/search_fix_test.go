@@ -18,12 +18,21 @@ import (
 // Executes production JS in a synthetic Node VM, never a browser/network.
 func runSearchFixture(t *testing.T, script string, feeds any, cards []any) json.RawMessage {
 	t.Helper()
+	return runProductionSearchFixture(t, script, feeds, cards, nil)
+}
+
+func runProductionSearchFixture(t *testing.T, script string, feeds any, cards []any, overrides map[string]any) json.RawMessage {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Fatal(err)
 	}
-	input, _ := json.Marshal(map[string]any{"script": script, "feeds": feeds, "cards": cards})
-	cmd := exec.Command(node, "-e", `const fs=require('fs'),vm=require('vm');const i=JSON.parse(fs.readFileSync(0,'utf8'));const cards=(i.cards||[]).map(c=>({hidden:c.hidden,getBoundingClientRect(){return {width:c.hidden?0:100,height:100}},querySelectorAll(s){if(s!=='a[href]')throw Error('selector');return c.links.map(h=>({getAttribute(k){if(k!=='href')throw Error('private field');return h}}))}}));const c=vm.createContext({URL,window:{location:{origin:'https://www.xiaohongshu.com'},__INITIAL_STATE__:{search:{feeds:i.feeds}}},document:{querySelectorAll(s){if(s!=='section.note-item')throw Error('broad selector');return cards}},getComputedStyle:()=>({display:'block',visibility:'visible'})});process.stdout.write(JSON.stringify(vm.runInContext(i.script,c,{timeout:1000})));`)
+	inputFields := map[string]any{"script": script, "feeds": feeds, "cards": cards}
+	for key, value := range overrides {
+		inputFields[key] = value
+	}
+	input, _ := json.Marshal(inputFields)
+	cmd := exec.Command(node, "testdata/search_result_dom.js")
 	cmd.Stdin = strings.NewReader(string(input))
 	out, err := cmd.Output()
 	if err != nil {
@@ -228,5 +237,51 @@ func TestSearchFixEmptyBoundedRealSearch(t *testing.T) {
 	}
 	if fake.navigationCalls != 1 || fake.stableCalls != 0 || fake.domCalls != 1 {
 		t.Fatal("unexpected retry or stability wait")
+	}
+}
+
+func TestProductionSearchAreaAndLinks(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cards     []any
+		overrides map[string]any
+		count     int
+	}{
+		{"observed cover and title", []any{map[string]any{"links": []any{
+			map[string]any{"href": "/explore/synthetic-note", "classes": []string{}, "hidden": true},
+			map[string]any{"href": "/search_result/synthetic-note?xsec_token=synthetic%2Baccess&xsec_source=pc_search", "classes": []string{"cover", "mask", "ld"}},
+			map[string]any{"href": "/search_result/synthetic-note?xsec_token=synthetic%2Baccess&xsec_source=pc_search", "classes": []string{"title"}},
+		}}}, nil, 1},
+		{"title href only", []any{map[string]any{"links": []any{map[string]any{"href": "https://www.xiaohongshu.com/search_result/synthetic-note?xsec_token=synthetic%2Baccess", "classes": []string{"title"}}}}}, nil, 1},
+		{"wrong area", []any{map[string]any{"links": []string{"/search_result/synthetic-note?xsec_token=synthetic-access"}}}, map[string]any{"areaClasses": []string{"unrelated-area"}}, 0},
+		{"wrong container", []any{map[string]any{"links": []string{"/search_result/synthetic-note?xsec_token=synthetic-access"}}}, map[string]any{"containerClasses": []string{"unrelated-list"}}, 0},
+		{"wrong card", []any{map[string]any{"tag": "div", "links": []string{"/search_result/synthetic-note?xsec_token=synthetic-access"}}}, nil, 0},
+		{"unrelated anchor", []any{map[string]any{"links": []any{map[string]any{"href": "/search_result/synthetic-note?xsec_token=synthetic-access", "classes": []string{"unrelated-link"}}}}}, nil, 0},
+		{"hidden cover", []any{map[string]any{"links": []any{map[string]any{"href": "/search_result/synthetic-note?xsec_token=synthetic-access", "hidden": true}}}}, nil, 0},
+		{"outside only", nil, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := runProductionSearchFixture(t, "("+renderedSearchFeedsJS+")()", nil, tc.cards, tc.overrides)
+			var feeds []Feed
+			if err := json.Unmarshal(raw, &feeds); err != nil {
+				t.Fatal(err)
+			}
+			if len(feeds) != tc.count {
+				t.Fatal("production scope mismatch", len(feeds))
+			}
+			if tc.count > 0 {
+				if feeds[0].ID != "synthetic-note" || feeds[0].XsecToken != "synthetic+access" || feeds[0].Index != 0 || feeds[0].ModelType != "note" || !reflect.DeepEqual(feeds[0].NoteCard, NoteCard{}) {
+					t.Fatal("minimal contract mismatch")
+				}
+			}
+			readiness := runProductionSearchFixture(t, searchReadinessJS, nil, tc.cards, tc.overrides)
+			expected := `"none"`
+			if tc.count > 0 {
+				expected = `"DOM"`
+			}
+			if string(readiness) != expected {
+				t.Fatal("shared recognizer mismatch")
+			}
+		})
 	}
 }

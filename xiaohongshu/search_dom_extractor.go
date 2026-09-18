@@ -13,13 +13,18 @@ import (
 
 // Shared by readiness and extraction. Reads only rendered note-card links,
 // never author/content/image fields. Tokens remain in the runtime Feed only.
+// Production structure: search-layout__main > feeds-container > note-item.
+// Only cover/title hrefs supply access parameters; hidden placeholder anchors
+// and links outside the search result list are not candidates.
 const renderedSearchFeedsJS = `() => {
  const out = [], seen = new Set();
- const cards = document.querySelectorAll('section.note-item');
+ const cards = document.querySelectorAll('div.search-layout__main div.feeds-container > section.note-item');
  for (let index = 0; index < cards.length; index++) {
   const card = cards[index], rect = card.getBoundingClientRect(), style = getComputedStyle(card);
   if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden') continue;
-  for (const link of card.querySelectorAll('a[href]')) {
+  for (const link of card.querySelectorAll('a.cover[href], a.title[href]')) {
+   const linkRect = link.getBoundingClientRect(), linkStyle = getComputedStyle(link);
+   if (linkRect.width <= 0 || linkRect.height <= 0 || linkStyle.display === 'none' || linkStyle.visibility === 'hidden') continue;
    let url;
    try { url = new URL(link.getAttribute('href'), window.location.origin); } catch (_) { continue; }
    if (url.protocol !== 'https:' || !['www.xiaohongshu.com','xiaohongshu.com'].includes(url.hostname) || url.username || url.password || url.port) continue;
