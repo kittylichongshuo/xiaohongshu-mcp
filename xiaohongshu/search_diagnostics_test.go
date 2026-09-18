@@ -69,7 +69,7 @@ func diagnosticFakeSearch(ctx context.Context, d *SearchDiagnostics, probe func(
 	d.Step(ctx, "stable_wait", func() {})
 	d.Step(ctx, "result_state_wait", func() {})
 	var data string
-	d.Step(ctx, "extraction", func() { data = `[{"modelType":"note","id":"synthetic"}]` })
+	d.Step(ctx, "extraction", func() { data = `[{"modelType":"note","id":"synthetic","xsecToken":"synthetic-access"}]` })
 	d.Begin("parse_start")
 	var feeds []Feed
 	err := json.Unmarshal([]byte(data), &feeds)
@@ -354,15 +354,16 @@ func TestSearchDiagnosticsProductionWaitContract(t *testing.T) {
 	for text, count := range map[string]int{
 		"Timeout(60 * time.Second)":                                     2,
 		"page.MustNavigate(searchURL)":                                  1,
-		"page.MustWaitStable()":                                         1,
-		"page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)": 1,
+		"page.MustWaitStable()":                                         0,
+		"page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)": 0,
+		"waitSearchResultReady(page)":                                   1,
 		"waitFeedsChanged(page, before, 15*time.Second)":                1,
 	} {
 		if strings.Count(s, text) != count {
 			t.Fatalf("frozen call changed: %s", text)
 		}
 	}
-	for _, stage := range []string{"navigation", "stable_wait", "result_state_wait", "extraction"} {
+	for _, stage := range []string{"navigation", "result_state_wait", "extraction"} {
 		if !strings.Contains(s, `diagnostics.Step(page.GetContext(), "`+stage+`",`) {
 			t.Fatal("missing production stage", stage)
 		}
@@ -375,13 +376,16 @@ func TestSearchDiagnosticsProductionWaitContract(t *testing.T) {
 // This fake replaces ALL Rod transport I/O, including navigation. No browser
 // process or network connection exists, even though the real Search runs.
 type diagnosticFakeCDP struct {
-	mu                          sync.Mutex
-	events                      chan *cdp.Event
-	navigationCalls, probeCalls int
-	probeError                  bool
-	probeVisible                bool
-	extractionSource            string
-	extractionJSON              *string
+	mu                                    sync.Mutex
+	events                                chan *cdp.Event
+	navigationCalls, probeCalls           int
+	probeError                            bool
+	probeVisible                          bool
+	extractionSource                      string
+	extractionJSON                        *string
+	readinessSource                       string
+	domJSON                               string
+	domCalls, readinessCalls, stableCalls int
 }
 
 func (f *diagnosticFakeCDP) Event() <-chan *cdp.Event { return f.events }
@@ -400,9 +404,26 @@ func (f *diagnosticFakeCDP) Call(ctx context.Context, session, method string, pa
 		f.navigationCalls++
 		return []byte(`{"frameId":"fake"}`), nil
 	case "DOMSnapshot.captureSnapshot":
+		f.stableCalls++
 		return []byte(`{"documents":[],"strings":["unchanged"]}`), nil
 	case "Runtime.evaluate":
 		req := params.(proto.RuntimeEvaluate)
+		if req.Expression == searchReadinessJS {
+			f.readinessCalls++
+			source := f.readinessSource
+			if source == "" {
+				source = "state"
+			}
+			return json.Marshal(map[string]any{"result": map[string]any{"type": "string", "value": source}})
+		}
+		if req.Expression == "("+renderedSearchFeedsJS+")()" {
+			f.domCalls++
+			data := f.domJSON
+			if data == "" {
+				data = "[]"
+			}
+			return []byte(`{"result":{"type":"object","value":` + data + `}}`), nil
+		}
 		if req.Expression == "window" {
 			return []byte(`{"result":{"type":"object","objectId":"window"}}`), nil
 		}
@@ -424,7 +445,7 @@ func (f *diagnosticFakeCDP) Call(ctx context.Context, session, method string, pa
 	case "Runtime.callFunctionOn":
 		req := params.(proto.RuntimeCallFunctionOn)
 		if strings.Contains(req.FunctionDeclaration, "JSON.stringify(feedsData)") {
-			data := `[{"modelType":"note","id":"synthetic"}]`
+			data := `[{"modelType":"note","id":"synthetic","xsecToken":"synthetic-access"}]`
 			if f.extractionJSON != nil {
 				data = *f.extractionJSON
 			}
@@ -481,6 +502,9 @@ func TestSearchDiagnosticsRealSearchWithFakeTransport(t *testing.T) {
 			fake.mu.Lock()
 			calls, probes := fake.navigationCalls, fake.probeCalls
 			fake.mu.Unlock()
+			if fake.stableCalls != 0 || fake.readinessCalls != 1 || fake.domCalls != 0 {
+				t.Fatal("readiness/state priority changed")
+			}
 			if calls != 1 {
 				t.Fatalf("navigation/retry changed: %d", calls)
 			}
@@ -497,7 +521,7 @@ func TestSearchDiagnosticsRealSearchWithFakeTransport(t *testing.T) {
 				return
 			}
 			events := diagnosticTestEvents(t, path)
-			want := []string{"navigation_start", "navigation_end", "search_request_submitted", "results_visible_probe", "stable_wait_start", "stable_wait_end", "results_visible_probe", "result_state_wait_start", "result_state_wait_end", "extraction_start", "extraction_end", "parse_start", "parse_end", "zero_result_provenance"}
+			want := []string{"navigation_start", "navigation_end", "search_request_submitted", "results_visible_probe", "result_state_wait_start", "result_state_wait_end", "results_visible_probe", "extraction_start", "extraction_end", "parse_start", "parse_end", "zero_result_provenance"}
 			var stages []string
 			for _, event := range events {
 				if event.Stage != "search_state_timeline" {
@@ -527,7 +551,7 @@ func TestSearchDiagnosticsRealSearchWithFakeTransport(t *testing.T) {
 					}
 				}
 			}
-			if !reflect.DeepEqual(phases, []string{"after_navigation", "after_stable_wait", "after_result_state_wait", "before_extraction"}) {
+			if !reflect.DeepEqual(phases, []string{"after_navigation", "after_result_state_wait", "before_extraction"}) {
 				t.Fatal(phases)
 			}
 			if visible[0].Status != status || visible[1].Status != status {

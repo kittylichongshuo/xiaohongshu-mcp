@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 )
 
@@ -101,7 +100,7 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	}
 
 	// 注意 .Context(ctx) 会替换掉 NewSearchAction 里设的 60s deadline，必须在其后重新 Timeout，
-	// 否则搜索页不 stable 时 MustWaitStable/MustWait 会永久挂起（无 deadline 可依赖）。
+	// 保留整个 Search 的 60s 上限；结果 readiness 另有独立的 20s 上限。
 	page := s.page.Context(ctx).Timeout(60 * time.Second)
 	diagnostics := SearchDiagnosticsFrom(ctx)
 	defer diagnostics.ObserveContext(page.GetContext())
@@ -114,12 +113,12 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	diagnostics.ProbeTimeline(page, "after_navigation")
 	func() {
 		defer diagnostics.ProbeResults(page)
-		diagnostics.Step(page.GetContext(), "stable_wait", func() { page.MustWaitStable() })
+		diagnostics.Step(page.GetContext(), "result_state_wait", func() {
+			if err := waitSearchResultReady(page); err != nil {
+				panic(err)
+			}
+		})
 	}()
-	diagnostics.ProbeTimeline(page, "after_stable_wait")
-	diagnostics.Step(page.GetContext(), "result_state_wait", func() {
-		page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
-	})
 	diagnostics.ProbeTimeline(page, "after_result_state_wait")
 	humanize.Delay(ctx, humanize.AfterNavigate)
 
@@ -212,7 +211,7 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 
 	if result == "" {
 		diagnostics.Provenance(extractionSource, nil, nil, false, containerState)
-		return nil, errors.ErrNoFeeds
+		return extractRenderedSearchFeeds(page)
 	}
 
 	var feeds []Feed
@@ -226,7 +225,10 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 
 	notes := onlyNotes(feeds)
 	diagnostics.Provenance(extractionSource, feeds, notes, true, containerState)
-	return notes, nil
+	if hasUsableSearchNote(notes) {
+		return notes, nil
+	}
+	return extractRenderedSearchFeeds(page)
 }
 
 // feedIDsJS 读当前结果集的 id 列表，用来判断数据有没有换一批。

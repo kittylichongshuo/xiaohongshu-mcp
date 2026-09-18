@@ -88,10 +88,10 @@ func TestSearchProvenanceRealSearchFakeCDP(t *testing.T) {
 		raw, post          int
 		wantError          bool
 	}{
-		{"value", "value", `[{"modelType":"note","id":"synthetic"},{"modelType":"live_v2"}]`, 2, 1, false},
+		{"value", "value", `[{"modelType":"note","id":"synthetic","xsecToken":"synthetic-access"},{"modelType":"live_v2"}]`, 2, 1, false},
 		{"fallback", "_value", `[{"modelType":"live_v2"},{"modelType":""}]`, 2, 0, false},
 		{"empty", "value", `[]`, 0, 0, false},
-		{"no feeds", "none", "", 0, 0, true},
+		{"no feeds", "none", "", 0, 0, false},
 		{"invalid JSON", "_value", "{", 0, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -106,7 +106,12 @@ func TestSearchProvenanceRealSearchFakeCDP(t *testing.T) {
 			}
 			if !tc.wantError {
 				var original []Feed
-				if err := json.Unmarshal([]byte(tc.data), &original); err != nil {
+				if err := json.Unmarshal([]byte(func() string {
+					if tc.data == "" {
+						return "[]"
+					}
+					return tc.data
+				}()), &original); err != nil {
 					t.Fatal(err)
 				}
 				if !reflect.DeepEqual(notes, onlyNotes(original)) {
@@ -120,10 +125,10 @@ func TestSearchProvenanceRealSearchFakeCDP(t *testing.T) {
 					if e.ExtractionSource != tc.source {
 						t.Fatal(e)
 					}
-					if !tc.wantError && (*e.RawExtractedFeedCount != tc.raw || *e.PostOnlyNotesCount != tc.post) {
+					if !tc.wantError && tc.data != "" && (*e.RawExtractedFeedCount != tc.raw || *e.PostOnlyNotesCount != tc.post) {
 						t.Fatal(e)
 					}
-					if tc.wantError && (e.RawExtractedFeedCount != nil || e.PostOnlyNotesCount != nil) {
+					if (tc.wantError || tc.data == "") && (e.RawExtractedFeedCount != nil || e.PostOnlyNotesCount != nil) {
 						t.Fatal("fabricated counts")
 					}
 				}
